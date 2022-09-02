@@ -1,0 +1,7 @@
+*
+!.gitignore
+!build
+!conf
+!README.md
+!script
+!upload

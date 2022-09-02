@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+. conf
+
+rsync -Pa "apt/" "$servAddr:$servAptDir"
+ssh -tt "$servAddr" "echo \"deb [arch=$debArch signed-by=$servAptDir/gpg "\
+"trusted=yes] file:$servAptDir/ $debSuite $debComp\" | sudo tee "\
+"/etc/apt/sources.list.d/$projId.list
+sudo apt update -o Dir::Etc::sourcelist='sources.list.d/$projId.list' "\
+"-o Dir::Etc::sourceparts='-' -o APT::Get::List-Cleanup='0'
+sudo apt install minidlna"

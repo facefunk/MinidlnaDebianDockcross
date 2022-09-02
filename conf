@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+
+# projId is a short name for this project, used as a Docker repository name.
+projId="mdlnadadx"
+
+# dockxArch is the dockcross image name to use as a base for out cross compiler.
+dockxArch="linux-armv7a-lts"
+# dockxTag is the tag of the dockcross image to use. By default, this is set to
+# latest but can be pinned at a specific version in case, for instance, the
+# version of Debian used by dockcross is upgraded.
+# See https://registry.hub.docker.com/r/dockcross/linux-armv7a-lts/tags
+dockxTag="latest"
+# dockxScript is the name of the dockcross script that will be generated.
+dockxScript="$projId-$dockxArch"
+# dockerImg is the name for the Docker image we will build.
+dockerImg="$projId/$dockxArch"
+
+# mdRepo is the string of arguments to be passed to git clone to get the
+# MiniDLNA source code. This allows you to change the repository and branch used
+# among other things. For expediency, we've also set depth=1 to prevent git from
+# downloading the entire history.
+mdRepo="--depth=1 --branch=master https://github.com/facefunk/minidlna.git"
+# mdArch is the MiniDLNA name for the architecture to target.
+mdArch="armv7a"
+
+# ffRepo is the same as mdRepo but for FFmpeg.
+ffRepo="--depth=1 --branch=libavformat58 https://github.com/facefunk/FFmpeg.git"
+# ffArch is the FFmpeg name for the architecture to target.
+ffArch="armv7-a"
+
+# debs is a list of Debian debs to download and link against.
+debs="
+libc6
+libc6-dev
+libexif12
+libexif-dev
+libflac8
+libflac-dev
+libid3tag0
+libid3tag0-dev
+libjpeg62-turbo
+libjpeg62-turbo-dev
+libogg0
+libogg-dev
+libsqlite3-0
+libsqlite3-dev
+libvorbis0a
+libvorbis-dev
+zlib1g
+zlib1g-dev
+"
+# debArch is the Debian architecture to target. Debian, MiniDLNA and FFmpeg all
+# use different names to refer to the same architecture.
+debArch="armhf"
+# debArchDir is the Debian multiarch directory name used by the targeted
+# architecture.
+debArchDir="arm-linux-gnueabihf"
+# debLibDir is the Debian multiarch lib directory under /usr.
+debLibDir="lib/$debArchDir"
+# debVer is the version number to give the generated deb package.
+debVer="1.3.1.1P~fcfnk.0"
+# debName is the file name of the generated deb package.
+debName="minidlna_${debVersion}_$debArch"
+# debSuite is the Debian suite name to target. Used in APT repository
+# generation.
+debSuite="stable"
+# debComp is the Debian component name to target. Used in APT repository
+# generation.
+debComp="main"
+# debCodename is the Debian release codename to target. Used in APT repository
+# generation.
+debCodename="bullseye"
+
+# authorName is your name! The name to set as the deb maintainer and the APT
+# repository origin.
+authorName="Facefunk"
+# authorEmail is the email address to go with authorName.
+authorEmail="facefunk@fcfnk.com"
+# gpgKeyName is the name to use when generating a GPG key.
+gpgKeyName="$authorName"
+
+# makeThreads is the number of threads make should use when compiling.
+# This is set by default to the number of cores available plus one but in case
+# of problems or preference this can be changed here.
+makeThreads=$(($(nproc)+1))
+
+# servAddr is the server address to upload the generated APT repository to.
+servAddr="optimus.local"
+# servAptDir is the location on the server to store the APT repository.
+# Note that variables to be interpolated on the server should be escaped with \$
+servAptDir="\$HOME/$projId-apt"

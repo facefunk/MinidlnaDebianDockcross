@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+
+. conf
+
+work="$PWD"
+
+downloadDebs() {
+    echo -e "\nDownloading debs"
+    
+    mkdir -p "$work/debs"
+    cd "$work/debs"
+    echo "In $PWD:"
+    
+    while read pkg; do
+        [[ -n "$pkg" ]] && pkgs+=" $pkg:$debArch"
+    done <<< "$debs"
+    apt-get download$pkgs
+}
+
+cloneRepos() {
+    echo -e "\nCloning repositories"
+    
+    cd "$work"
+    echo "In $PWD:"
+
+    git clone $mdRepo
+    git clone $ffRepo
+}
+
+downloadTemplate() {
+    echo -e "\nDownloading template deb"
+    
+    mkdir -p "$work/template"
+    cd "$work/template"
+    echo "In $PWD:"
+
+    apt-get download "minidlna:$debArch"
+}
+
+extractDebs() {
+    echo -e "\nExtracting debs"
+    
+    cd "$work/debs"
+    echo "In $PWD:"
+    
+    local depends="adduser"$'\n'"lsb-base"$'\n'
+
+    mkdir -p "$work/control"
+
+    while read fname; do
+        echo "-   $fname"
+        ar x $fname
+        tar -xf data.tar.* -C "$work"
+
+        # Generate a list of depends while we're at it.
+        tar -xf control.tar.* -C "$work/control"
+        local package=$(grep -Po "^Package:\s+\K.+$" "$work/control/control")
+        if [[ "$package" != *"-dev" ]]; then
+            local version=$(grep -Po "^Version:\s+\K.+$" \
+                "$work/control/control")
+            depends+="$package (>= $version)"$'\n'
+        fi
+
+        rm -f {control.tar.*,data.tar.*,debian-binary}
+    done < <(find . -type f -name "*.deb")
+
+    echo "Adding deb libs to depends file"
+    echo -n "$depends" > "$work/template/depends"
+    rm -rf "$work/control"
+}
+
+buildFFmpeg() {
+    echo -e "\nBuilding FFmpeg"
+    
+    cd "$work/FFmpeg"
+    echo "In $PWD:"
+    
+    make distclean
+    ./configure --enable-shared --enable-cross-compile --disable-programs \
+        --disable-doc --arch="$ffArch" --target-os=linux \
+        --prefix="$work/usr" \
+        --cross-prefix="$CROSS_ROOT/bin/$CROSS_TRIPLE-"
+    make -j$makeThreads
+}
+
+installFFmpeg() {
+    echo -e "\nInstalling FFmpeg libs to $work/usr"
+
+    cd "$work/FFmpeg"
+    echo "In $PWD:"
+
+    make install
+
+    echo "Adding FFmpeg libs to depends file"
+    find "$work/usr/lib" -regextype posix-egrep -regex \
+        '.+/libav(format|util)\.so\.[0-9]+' -printf '%f\n' | sed 's/\.so\.//g' \
+        >> "$work/template/depends"
+}
+
+massageLibs() {
+    echo -e "\nAmalgamating lib dirs"
+
+    cd "$work"
+    echo "In $PWD:"
+
+    find lib -type f -exec mv {} usr/lib \;
+    find lib -xtype l -exec mv {} usr/lib \;
+    rsync -a "usr/$debLibDir/" usr/lib
+    rsync -a "usr/include/$debArchDir/" usr/include
+
+    echo "Cleaning up lib dirs"
+    rm -rf lib etc usr/share "usr/$debLibDir" "usr/include/$debArchDir"
+
+    cd usr/lib
+    echo "In $PWD:"
+
+    echo "Relinking symbolic links"
+    while read fname; do
+        IFS="'" read _ _ _ old < <(stat -c%N "$fname")
+        if [[ "$old" == "/$debLibDir/"* ]]; then
+            new="${old##*"/$debLibDir/"}"
+            echo "-   $fname"
+            rm -f "$fname"
+            ln -s "$new" "$fname"
+        fi
+    done < <(find . -xtype l)
+
+    echo "Relinking linker script ./libc.so"
+    sed -i -E "s|(/usr)?(/lib)?(/$debArchDir)?/(\S+\.\S+)|\4|g" libc.so
+}
+
+buildMiniDLNA() {
+    echo -e "\nBuilding MiniDLNA"
+
+    cd "$work/minidlna"
+    echo "In $PWD:"
+
+    ./autogen.sh
+    make distclean
+    export LDFLAGS="-lpthread -lm" SEARCH_DIR="$work/usr" \
+        INCLUDE_DIR="$work/usr/include"
+    ./configure --host=$mdArch --prefix="$work/$debName/usr"
+    make -j$makeThreads
+}
+
+extractTemplate() {
+    echo -e "\nExtracting template deb"
+    
+    ar x "$work/template/"*.deb
+    mkdir -p "$work/$debName/DEBIAN"
+    tar -xf data.tar.* -C "$work/$debName"
+    tar -xf control.tar.* -C "$work/$debName/DEBIAN"
+    rm -f {control.tar.*,data.tar.*,debian-binary}
+}
+
+installMiniDLNA() {
+    echo -e "\nSyncing MiniDLNA"
+
+    cd "$work/minidlna"
+    echo "In $PWD:"
+
+    make install
+}
+
+generateDebFiles() {
+    echo -e "\nEditing deb control files"
+
+    cd "$work/$debName"
+    echo "In $PWD:"
+
+    local total=$(du -s "$work/$debName" | grep -Po '^\d+')
+    local debian=$(du -s "$work/$debName/DEBIAN" | grep -Po '^\d+')
+    local size=$((total-debian))
+
+    while read dep; do
+        local depends+="$dep, "
+    done < "$work/template/depends"
+    depends=${depends::-2}
+
+    sed -i -E "
+        s/^(Version:).+/\\1 $debVersion/g
+        s/^(Architecture:).+/\\1 $debArch/g
+        s/^(Maintainer:).+/\\1 $authorName <$authorEmail>/g
+        s/^(Installed-Size:).+/\\1 $size/g
+        s/^(Depends:).+/\\1 $depends/g
+        " "$work/$debName/DEBIAN/control"
+
+    while read _ fname; do
+        local md5sums+="$(md5sum "$fname")"$'\n'
+    done < "$work/$debName/DEBIAN/md5sums"
+    echo -n "$md5sums" > "$work/$debName/DEBIAN/md5sums"
+}
+
+buildDeb() {
+    echo -e "\nBuilding deb"
+
+    mkdir -p "$work/apt/pool"
+    dpkg-deb --build "$work/$debName" "$work/apt/pool/$debName.deb"
+}
+
+generateAptFiles() {
+    echo -e "\nGenerating APT files."
+
+    if [[ ! -f "$work/template/gpg.private" ]]; then
+        local batch="$work/template/gpg.batch"
+        echo "%echo Generating PGP key
+Key-Type: RSA
+Key-Length: 4096
+Name-Real: $gpgKeyName
+Name-Email: $authorEmail
+Expire-Date: 0
+%no-ask-passphrase
+%no-protection
+%commit
+" > "$batch"
+        gpg --no-tty --batch --gen-key "$batch"
+        gpg --armor --export-secret-keys --output "$work/template/gpg.private" \
+            "$gpgKeyName"
+    fi
+
+    echo "APT::FTPArchive::Release {
+    Origin \"$authorName\";
+    Suite \"$debSuite\";
+    Codename \"$debCodename\";
+    Architectures \"$debArch\";
+    Components \"$debComp\";
+};
+" > "$work/template/apt-ftp.conf"
+
+    echo "Dir::ArchiveDir \".\";
+Dir::CacheDir \".\";
+TreeDefault::Directory \"pool/\";
+Default::Packages::Extensions \".deb\";
+Default::Packages::Compress \". gzip\";
+Default::Contents::Compress \"gzip\";
+
+BinDirectory \"dists/$debSuite/$debComp/binary-$debArch\" {
+    Packages \"dists/$debSuite/$debComp/binary-$debArch/Packages\";
+    Contents \"dists/$debSuite/Contents-$debArch\";
+};
+
+Tree \"dists/$debSuite\" {
+    Sections \"$debComp\";
+    Architectures \"$debArch\";
+};
+" > "$work/template/apt-generate.conf"
+}
+
+buildAptRepo() {
+    echo -e "\nBuilding APT repository"
+
+    cd "$work/apt"
+    echo "In $PWD:"
+
+    mkdir -p "$work/apt/dists/$debSuite/$debComp/binary-$debArch"
+
+    apt-ftparchive generate -c="$work/template/apt-ftp.conf" \
+        "$work/template/apt-generate.conf"
+    apt-ftparchive release -c="$work/template/apt-ftp.conf" "dists/$debSuite" \
+        > "dists/$debSuite/Release"
+
+    cd "$work/apt/dists/$debSuite"
+    echo "In $PWD:"
+
+    gpg --import "$work/template/gpg.private"
+    gpg --armor --export --yes --output "$work/apt/gpg" "$gpgKeyName"
+    gpg --armor -u "$gpgKeyName" --detach-sign --yes --output Release.gpg \
+        Release
+    gpg --armor -u "$gpgKeyName" --clear-sign --yes --output InRelease Release
+}
+
+# Download steps
+downloadDebs
+cloneRepos
+downloadTemplate
+
+# Build steps
+extractDebs
+buildFFmpeg
+installFFmpeg
+massageLibs
+buildMiniDLNA
+
+# Package steps
+extractTemplate
+installMiniDLNA
+generateDebFiles
+buildDeb
+generateAptFiles
+buildAptRepo
